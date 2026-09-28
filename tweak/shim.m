@@ -12,9 +12,14 @@
 //    只在这一个进程内，把「同时含 { 和 } 的命令」转交 /usr/bin/bash 执行；
 //    其余所有命令 100% 走原来的 system()，行为与改动前完全一致。
 //    进程外（系统 /bin/sh）不作任何改动 —— 这就是「只对 AXJ 生效」。
+//
+// 注意
+//    iOS SDK 把 system() 标成了 __attribute__((unavailable))，直接写 &system 编不过。
+//    DHPDaemon 是 2020 年用老 SDK 编的，它照样导入了 _system —— 所以运行时有这个符号。
+//    这里用 dlsym 在运行期取它的真实入口，既绕开编译期限制，又拿到真实函数地址。
 
 #import <substrate.h>
-#import <stdlib.h>
+#import <dlfcn.h>
 #import <string.h>
 #import <spawn.h>
 #import <errno.h>
@@ -23,14 +28,15 @@
 
 extern char **environ;
 
-static int (*orig_system)(const char *);
+typedef int (*axj_system_fn)(const char *);
+static axj_system_fn orig_system = NULL;
 
 static int axj_system(const char *cmd) {
     if (cmd == NULL) {
         return orig_system ? orig_system(cmd) : -1;
     }
 
-    // 只有同时含 { 和 } 的命令才需要 bash 的花括号展开；其余原样走 dash。
+    // 只有同时含 { 和 } 的命令才需要 bash 的花括号展开；其余原样走原实现。
     // 这个判断让「非花括号命令」的行为与装本 shim 之前逐字节一致，是刻意的保守设计。
     if (orig_system == NULL ||
         strchr(cmd, '{') == NULL || strchr(cmd, '}') == NULL) {
@@ -57,5 +63,12 @@ static int axj_system(const char *cmd) {
 // 用 constructor 而不是 logos 的 %ctor：本工程没有任何 %hook，
 // 这样能完全绕开 logos 展开带来的一堆坑。
 __attribute__((constructor)) static void axj_bash_shim_init(void) {
-    MSHookFunction((void *)system, (void *)axj_system, (void **)&orig_system);
+    void *sym = dlsym(RTLD_DEFAULT, "system");
+    if (sym == NULL) {
+        void *h = dlopen("/usr/lib/libsystem_c.dylib", RTLD_LAZY);
+        if (h) sym = dlsym(h, "system");
+    }
+    if (sym != NULL) {
+        MSHookFunction(sym, (void *)axj_system, (void **)&orig_system);
+    }
 }
