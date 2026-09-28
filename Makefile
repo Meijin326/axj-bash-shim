@@ -4,12 +4,6 @@ export INSTALL_TARGET_PROCESSES = DHPDaemon
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = AXJBashShim
-AXJBashShim_FILES = tweak/shim.m
-AXJBashShim_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-parameter
-AXJBashShim_LIBRARIES = substrate
+SUBPROJECTS += tweak
 
-include $(THEOS_MAKE_PATH)/tweak.mk
-
-after-install::
-	install.exec "launchctl kickstart -kp system/dhpdaemon || killall -9 DHPDaemon || true"
+include $(THEOS_MAKE_PATH)/aggregate.mk
