@@ -40,18 +40,54 @@
 extern char **environ;
 
 #define SHIM_LOG "/var/mobile/Documents/axjshim.log"
-#define SHIM_LOG_FALLBACK "/tmp/axjshim.log"
 #define SHIM_LOG_MAX (256 * 1024)
 
 // ---------------------------------------------------------------- log
 
-static void shim_log(const char *fmt, ...) {
-    struct stat st;
-    if (stat(SHIM_LOG, &st) == 0 && st.st_size > SHIM_LOG_MAX) {
-        unlink(SHIM_LOG);
+// 依次尝试多个落地位置，取第一个可写的：
+//   1) /var/mobile/Documents/axjshim.log  （root 进程、无沙箱 App 都写得进）
+//   2) $HOME/axjshim.log                  （若 App 被沙箱限制，就落在它自己的容器里）
+//   3) /tmp/axjshim.log
+// 这样无论注入到 root 守护进程还是 App，都能留下证据。
+static const char *shim_log_path(void) {
+    static char chosen[1024];
+    if (chosen[0] != '\0') return chosen;
+
+    char homep[900];
+    homep[0] = '\0';
+    const char *home = getenv("HOME");
+    if (home != NULL && home[0] != '\0') {
+        snprintf(homep, sizeof(homep), "%s/axjshim.log", home);
     }
-    FILE *f = fopen(SHIM_LOG, "a");
-    if (f == NULL) f = fopen(SHIM_LOG_FALLBACK, "a");
+
+    const char *cands[3];
+    cands[0] = SHIM_LOG;
+    cands[1] = (homep[0] != '\0') ? homep : NULL;
+    cands[2] = "/tmp/axjshim.log";
+
+    for (int i = 0; i < 3; i++) {
+        if (cands[i] == NULL) continue;
+        FILE *f = fopen(cands[i], "a");
+        if (f != NULL) {
+            fclose(f);
+            strncpy(chosen, cands[i], sizeof(chosen) - 1);
+            chosen[sizeof(chosen) - 1] = '\0';
+            return chosen;
+        }
+    }
+    chosen[0] = '\0';
+    return NULL;
+}
+
+static void shim_log(const char *fmt, ...) {
+    const char *path = shim_log_path();
+    if (path == NULL) return;
+
+    struct stat st;
+    if (stat(path, &st) == 0 && st.st_size > SHIM_LOG_MAX) {
+        unlink(path);
+    }
+    FILE *f = fopen(path, "a");
     if (f == NULL) return;
 
     time_t t = time(NULL);
@@ -298,8 +334,8 @@ __attribute__((constructor)) static void axj_bash_shim_init(void) {
         exe[sizeof(exe) - 1] = '\0';
     }
 
-    shim_log("=== LOADED pid=%d uid=%d euid=%d exe=%s",
-             getpid(), getuid(), geteuid(), exe);
+    shim_log("=== LOADED pid=%d uid=%d euid=%d exe=%s log=%s",
+             getpid(), getuid(), geteuid(), exe, shim_log_path() ?: "(nowhere)");
 
     shim_hook("system", (void *)shim_system, (void **)&orig_system, "libsystem_c");
     shim_hook("posix_spawn", (void *)shim_posix_spawn, (void **)&orig_posix_spawn, "libsystem_kernel");

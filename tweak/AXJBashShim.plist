@@ -1,1 +1,1 @@
-{ Filter = { Executables = ( DHPDaemon, YOY ); }; }
+{ Filter = { Bundles = ( YOY ); Executables = ( DHPDaemon ); }; }
