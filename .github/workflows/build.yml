@@ -44,9 +44,11 @@ jobs:
           ls -lh packages/
 
       - name: Inspect deb
+        continue-on-error: true
         run: |
-          set -e
+          set +e
           shopt -s nullglob
+          ls -lh packages/
           for f in packages/*.deb; do
             echo "== $f =="
             ar t "$f" || true
