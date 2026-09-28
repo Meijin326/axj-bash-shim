@@ -1,48 +1,120 @@
-// AXJBashShim —— 只注入 DHPDaemon，把「需要花括号展开的命令」交给 bash 执行
+// AXJBashShim —— 在 AXJ(YOY) 的进程内，把「需要花括号展开的命令」交给 bash 执行
 //
 // 背景
-//    AXJ(爱思助手/YOY) 的 root 守护进程 DHPDaemon 用 system() 执行清容器命令，
-//    命令形如:  rm -rf <容器路径>/{Documents,Library,tmp,StoreKit}
-//    这里的 {} 需要 shell 做 brace expansion。而 procursus 的 /bin/sh 指向 dash，
-//    dash 不做花括号展开 → rm -rf 打在字面路径 "{Documents,Library,tmp,StoreKit}" 上
-//    → 带 -f 静默返回成功、一个目录都没删 → 表现为「点一键新机没反应 / 账号不变」。
-//    （unc0ver 环境下 /bin/sh 是 bash 系，所以以前一直好用。）
+//   AXJ 清 App 数据容器时执行形如下面的命令：
+//       rm -rf  <容器路径>/{Documents,Library,tmp,StoreKit}
+//       mkdir -p <容器路径>/{Documents,Library,tmp,StoreKit}
+//   这串路径要靠 shell 做 brace expansion。而 procursus(Taurine) 的 /bin/sh 指向 dash，
+//   dash 不做花括号展开 → 命令打在一个字面名字 "{Documents,Library,tmp,StoreKit}" 上，
+//   rm -rf 带 -f 静默返回成功、mkdir 则真建出那个怪名字的目录 → 表现为
+//   「点一键新机/换备份没反应、账号不变」。
+//   （unc0ver 环境下 /bin/sh 是 bash 系，所以以前一直好用。）
 //
-// 本 shim 做的事
-//    只在这一个进程内，把「同时含 { 和 } 的命令」转交 /usr/bin/bash 执行；
-//    其余所有命令 100% 走原来的 system()，行为与改动前完全一致。
-//    进程外（系统 /bin/sh）不作任何改动 —— 这就是「只对 AXJ 生效」。
+// 本 shim 做的事（只在这几个进程内，进程外 /bin/sh 一律不动）
+//   拦截该进程发起 shell 的四个入口：system / posix_spawn / posix_spawnp / execve / popen*
+//   仅当「路径是 sh 且命令同时含 { 和 }」时，把要执行的 shell 换成 /usr/bin/bash；
+//   其余 100% 走原实现 —— 保证非花括号命令的行为与装本 shim 之前逐字节一致。
+//
+// 同时写诊断日志到 /var/mobile/Documents/axjshim.log（失败退到 /tmp/axjshim.log）：
+//   记录谁加载了、谁执行了什么命令、结果如何。排查靠它，不靠猜。
 //
 // 注意
-//    iOS SDK 把 system() 标成了 __attribute__((unavailable))，直接写 &system 编不过。
-//    DHPDaemon 是 2020 年用老 SDK 编的，它照样导入了 _system —— 所以运行时有这个符号。
-//    这里用 dlsym 在运行期取它的真实入口，既绕开编译期限制，又拿到真实函数地址。
+//   iOS SDK 把 system() 标成 __attribute__((unavailable))，直接写 &system 编不过，
+//   故一律用 dlsym 在运行期取真实入口。
 
 #import <substrate.h>
 #import <dlfcn.h>
 #import <string.h>
+#import <stdio.h>
+#import <stdlib.h>
+#import <stdarg.h>
+#import <time.h>
 #import <spawn.h>
 #import <errno.h>
 #import <unistd.h>
+#import <fcntl.h>
+#import <sys/stat.h>
 #import <sys/wait.h>
+#import <mach-o/dyld.h>
 
 extern char **environ;
 
-typedef int (*axj_system_fn)(const char *);
-static axj_system_fn orig_system = NULL;
+#define SHIM_LOG "/var/mobile/Documents/axjshim.log"
+#define SHIM_LOG_FALLBACK "/tmp/axjshim.log"
+#define SHIM_LOG_MAX (256 * 1024)
 
-static int axj_system(const char *cmd) {
-    if (cmd == NULL) {
-        return orig_system ? orig_system(cmd) : -1;
+// ---------------------------------------------------------------- log
+
+static void shim_log(const char *fmt, ...) {
+    struct stat st;
+    if (stat(SHIM_LOG, &st) == 0 && st.st_size > SHIM_LOG_MAX) {
+        unlink(SHIM_LOG);
     }
+    FILE *f = fopen(SHIM_LOG, "a");
+    if (f == NULL) f = fopen(SHIM_LOG_FALLBACK, "a");
+    if (f == NULL) return;
 
-    // 只有同时含 { 和 } 的命令才需要 bash 的花括号展开；其余原样走原实现。
-    // 这个判断让「非花括号命令」的行为与装本 shim 之前逐字节一致，是刻意的保守设计。
-    if (orig_system == NULL ||
-        strchr(cmd, '{') == NULL || strchr(cmd, '}') == NULL) {
-        return orig_system(cmd);
+    time_t t = time(NULL);
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    fprintf(f, "[%02d:%02d:%02d] ", tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
+// ---------------------------------------------------------------- helpers
+
+static int shim_has_braces(const char *s) {
+    return s != NULL && strchr(s, '{') != NULL && strchr(s, '}') != NULL;
+}
+
+static int shim_mentioned(const char *s) {
+    return s != NULL && strstr(s, "Containers/Data/Application") != NULL;
+}
+
+static int shim_argv_has_braces(char *const argv[]) {
+    if (argv == NULL) return 0;
+    for (int i = 0; argv[i] != NULL; i++) {
+        if (shim_has_braces(argv[i])) return 1;
     }
+    return 0;
+}
 
+static const char *shim_argv_joined(char *const argv[]) {
+    static char buf[2048];
+    buf[0] = '\0';
+    if (argv == NULL) return buf;
+    size_t used = 0;
+    for (int i = 0; argv[i] != NULL && used + 2 < sizeof(buf); i++) {
+        size_t n = strlen(argv[i]);
+        if (n > sizeof(buf) - used - 2) n = sizeof(buf) - used - 2;
+        memcpy(buf + used, argv[i], n);
+        used += n;
+        buf[used++] = ' ';
+        buf[used] = '\0';
+    }
+    return buf;
+}
+
+// 只有 basename 恰为 "sh" 的路径才替换（/bin/sh、/usr/bin/sh、sh ...）
+static int shim_is_sh(const char *path) {
+    if (path == NULL) return 0;
+    const char *b = strrchr(path, '/');
+    b = (b != NULL) ? b + 1 : path;
+    return strcmp(b, "sh") == 0;
+}
+
+static int shim_is_read_mode(const char *mode) {
+    return mode != NULL && mode[0] == 'r';
+}
+
+// 用 bash 跑一段命令字符串，返回 wait 状态（对齐 system() 的语义）
+static int shim_run_with_bash(const char *cmd, const char *who) {
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     char *argv[] = { (char *)"sh", (char *)"-c", (char *)cmd, NULL };
@@ -50,9 +122,9 @@ static int axj_system(const char *cmd) {
     int rc = posix_spawn(&pid, "/usr/bin/bash", &fa, NULL, argv, environ);
     posix_spawn_file_actions_destroy(&fa);
     if (rc != 0) {
-        return orig_system(cmd);          // 保底：bash 起不来就退回原实现
+        shim_log("    !! %s: posix_spawn(bash) failed rc=%d errno=%d", who, rc, errno);
+        return -1;
     }
-
     int status = 0;
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) break;
@@ -60,15 +132,180 @@ static int axj_system(const char *cmd) {
     return status;
 }
 
-// 用 constructor 而不是 logos 的 %ctor：本工程没有任何 %hook，
-// 这样能完全绕开 logos 展开带来的一堆坑。
-__attribute__((constructor)) static void axj_bash_shim_init(void) {
-    void *sym = dlsym(RTLD_DEFAULT, "system");
+// ---------------------------------------------------------------- system()
+
+typedef int (*shim_system_fn)(const char *);
+static shim_system_fn orig_system = NULL;
+
+static int shim_system(const char *cmd) {
+    if (orig_system == NULL) return -1;
+    if (cmd == NULL) return orig_system(cmd);
+
+    if (!shim_has_braces(cmd)) {
+        if (shim_mentioned(cmd)) {
+            shim_log("system  (plain) uid=%d cmd=%s", getuid(), cmd);
+        }
+        return orig_system(cmd);
+    }
+
+    shim_log("system  (BRACE) uid=%d cmd=%s", getuid(), cmd);
+    int status = shim_run_with_bash(cmd, "system");
+    if (status < 0) return orig_system(cmd);
+    shim_log("    -> bash done status=%d", status);
+    return status;
+}
+
+// ---------------------------------------------------------------- posix_spawn()
+
+typedef int (*shim_spawn_fn)(pid_t *, const char *,
+                             const posix_spawn_file_actions_t *,
+                             const posix_spawnattr_t *,
+                             char *const[], char *const[]);
+static shim_spawn_fn orig_posix_spawn = NULL;
+static shim_spawn_fn orig_posix_spawnp = NULL;
+
+static int shim_spawn_common(shim_spawn_fn orig, const char *tag,
+                             pid_t *pid, const char *path,
+                             const posix_spawn_file_actions_t *fa,
+                             const posix_spawnattr_t *attr,
+                             char *const argv[], char *const envp[]) {
+    if (orig == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    const char *newpath = path;
+
+    if (shim_is_sh(path) && shim_argv_has_braces(argv)) {
+        newpath = "/usr/bin/bash";
+        shim_log("%s (BRACE) uid=%d %s -> /usr/bin/bash  argv=[%s]",
+                 tag, getuid(), path ? path : "(null)", shim_argv_joined(argv));
+    } else if (shim_argv_has_braces(argv)) {
+        shim_log("%s (brace-nonsh) uid=%d path=%s argv=[%s]",
+                 tag, getuid(), path ? path : "(null)", shim_argv_joined(argv));
+    } else if (shim_mentioned(shim_argv_joined(argv))) {
+        shim_log("%s (plain) uid=%d path=%s argv=[%s]",
+                 tag, getuid(), path ? path : "(null)", shim_argv_joined(argv));
+    }
+
+    return orig(pid, newpath, fa, attr, argv, envp);
+}
+
+static int shim_posix_spawn(pid_t *pid, const char *path,
+                            const posix_spawn_file_actions_t *fa,
+                            const posix_spawnattr_t *attr,
+                            char *const argv[], char *const envp[]) {
+    return shim_spawn_common(orig_posix_spawn, "spawn  ",
+                             pid, path, fa, attr, argv, envp);
+}
+
+static int shim_posix_spawnp(pid_t *pid, const char *path,
+                             const posix_spawn_file_actions_t *fa,
+                             const posix_spawnattr_t *attr,
+                             char *const argv[], char *const envp[]) {
+    return shim_spawn_common(orig_posix_spawnp, "spawnp ",
+                             pid, path, fa, attr, argv, envp);
+}
+
+// ---------------------------------------------------------------- execve()
+
+typedef int (*shim_execve_fn)(const char *, char *const[], char *const[]);
+static shim_execve_fn orig_execve = NULL;
+
+static int shim_execve(const char *path, char *const argv[], char *const envp[]) {
+    if (orig_execve == NULL) {
+        errno = ENOSYS;
+        return -1;
+    }
+    if (shim_is_sh(path) && shim_argv_has_braces(argv)) {
+        shim_log("execve  (BRACE) uid=%d %s -> /usr/bin/bash argv=[%s]",
+                 getuid(), path, shim_argv_joined(argv));
+        return orig_execve("/usr/bin/bash", argv, envp);
+    }
+    if (shim_mentioned(shim_argv_joined(argv))) {
+        shim_log("execve  (plain) uid=%d path=%s argv=[%s]",
+                 getuid(), path ? path : "(null)", shim_argv_joined(argv));
+    }
+    return orig_execve(path, argv, envp);
+}
+
+// ---------------------------------------------------------------- popen()
+
+typedef FILE *(*shim_popen_fn)(const char *, const char *);
+static shim_popen_fn orig_popen = NULL;
+
+// 把 cmd 安全地嵌进单引号里："'" -> "'\\''"
+static char *shim_sq_escape(const char *cmd) {
+    size_t n = strlen(cmd);
+    char *out = malloc(n * 4 + 32);
+    if (out == NULL) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (cmd[i] == '\'') {
+            memcpy(out + o, "'\\''", 4);
+            o += 4;
+        } else {
+            out[o++] = cmd[i];
+        }
+    }
+    out[o] = '\0';
+    return out;
+}
+
+static FILE *shim_popen(const char *cmd, const char *mode) {
+    if (orig_popen == NULL) return NULL;
+    if (cmd == NULL) return orig_popen(cmd, mode);
+
+    if (shim_has_braces(cmd) && shim_is_read_mode(mode)) {
+        char *esc = shim_sq_escape(cmd);
+        if (esc != NULL) {
+            size_t need = strlen(esc) + 64;
+            char *wrapped = malloc(need);
+            if (wrapped != NULL) {
+                snprintf(wrapped, need, "exec /usr/bin/bash -c '%s'", esc);
+                shim_log("popen   (BRACE->bash) uid=%d cmd=%s", getuid(), cmd);
+                FILE *fp = orig_popen(wrapped, mode);
+                free(wrapped);
+                free(esc);
+                return fp;
+            }
+            free(esc);
+        }
+    }
+
+    if (shim_mentioned(cmd)) {
+        shim_log("popen   (plain) uid=%d cmd=%s", getuid(), cmd);
+    }
+    return orig_popen(cmd, mode);
+}
+
+// ---------------------------------------------------------------- init
+
+static void shim_hook(const char *name, void *replace, void **orig, const char *tag) {
+    void *sym = dlsym(RTLD_DEFAULT, name);
     if (sym == NULL) {
-        void *h = dlopen("/usr/lib/libsystem_c.dylib", RTLD_LAZY);
-        if (h) sym = dlsym(h, "system");
+        shim_log("=== hook %-12s MISSING (symbol not found)", name);
+        return;
     }
-    if (sym != NULL) {
-        MSHookFunction(sym, (void *)axj_system, (void **)&orig_system);
+    MSHookFunction(sym, replace, orig);
+    shim_log("=== hook %-12s ok  sym=%p orig=%p  (%s)", name, sym, *orig, tag);
+}
+
+__attribute__((constructor)) static void axj_bash_shim_init(void) {
+    char exe[1024];
+    uint32_t sz = sizeof(exe);
+    if (_NSGetExecutablePath(exe, &sz) != 0) {
+        strncpy(exe, "?", sizeof(exe) - 1);
+        exe[sizeof(exe) - 1] = '\0';
     }
+
+    shim_log("=== LOADED pid=%d uid=%d euid=%d exe=%s",
+             getpid(), getuid(), geteuid(), exe);
+
+    shim_hook("system", (void *)shim_system, (void **)&orig_system, "libsystem_c");
+    shim_hook("posix_spawn", (void *)shim_posix_spawn, (void **)&orig_posix_spawn, "libsystem_kernel");
+    shim_hook("posix_spawnp", (void *)shim_posix_spawnp, (void **)&orig_posix_spawnp, "libsystem_kernel");
+    shim_hook("execve", (void *)shim_execve, (void **)&orig_execve, "libsystem_kernel");
+    shim_hook("popen", (void *)shim_popen, (void **)&orig_popen, "libsystem_c");
+
+    shim_log("=== READY  pid=%d", getpid());
 }

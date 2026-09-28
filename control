@@ -1,11 +1,13 @@
 Package: com.meijin.axjbashshim
 Name: AXJ Bash Shim
-Version: 1.0.0
+Version: 1.1.0
 Architecture: iphoneos-arm
-Description: 让 AXJ(爱思助手/YOY) 的守护进程用 bash 执行需要花括号展开的命令。
- 只在 DHPDaemon 这一个进程内生效：含 { } 的命令改用 /usr/bin/bash 执行，
- 其余命令 100% 走原 system()。不改动系统 /bin/sh，不影响任何其它插件。
+Description: 让 AXJ(YOY) 用 bash 执行需要花括号展开的命令。
+ 只在 YOY 与 DHPDaemon 这两个进程内生效：命令里同时含 { 和 } 时改用 /usr/bin/bash
+ 执行，其余命令 100% 走原实现，行为与装本插件之前完全一致。
+ 不改动系统 /bin/sh，不影响任何其它插件。
  解决「Taurine/procursus 下点一键新机没反应、账号不变」的问题。
+ 附诊断日志 /var/mobile/Documents/axjshim.log（记录谁加载、执行了什么、结果如何）。
 Homepage: https://github.com/Meijin326/axj-bash-shim
 Maintainer: Meijin
 Author: Meijin
