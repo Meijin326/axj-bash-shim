@@ -42,16 +42,23 @@ jobs:
           make clean
           make package FINALPACKAGE=1
           ls -lh packages/
-          echo "---- 产物字符串自检 ----"
-          python3 - <<'PY'
-          import glob, zipfile, io, tarfile, os, re
-          debs = glob.glob('packages/*.deb')
-          print('deb:', debs)
-          for d in debs:
-              raw = open(d,'rb').read()
-              print(d, 'size', len(raw), 'magic', raw[:8])
-              assert b'AXJBashShim' in raw or True
-          PY
+
+      - name: Inspect deb
+        run: |
+          set -e
+          shopt -s nullglob
+          for f in packages/*.deb; do
+            echo "== $f =="
+            ar t "$f" || true
+            echo "-- dylib/plist 成员 --"
+            ar p "$f" data.tar.lzma > /tmp/d.tar.lzma 2>/dev/null || ar p "$f" data.tar.gz > /tmp/d.tar.gz
+            if [ -f /tmp/d.tar.lzma ]; then tar tf /tmp/d.tar.lzma; else tar tzf /tmp/d.tar.gz; fi
+            echo "-- 字符串自检（确认是我们的产物）--"
+            if [ -f /tmp/d.tar.lzma ]; then tar xf /tmp/d.tar.lzma -C /tmp; else tar xzf /tmp/d.tar.gz -C /tmp; fi
+            strings /tmp/Library/MobileSubstrate/DynamicLibraries/AXJBashShim.dylib 2>/dev/null | grep -i "bash\|DHPDaemon" | head -5 || true
+            echo "-- plist 内容 --"
+            cat /tmp/Library/MobileSubstrate/DynamicLibraries/AXJBashShim.plist 2>/dev/null || true
+          done
 
       - name: Upload deb
         uses: actions/upload-artifact@v4
