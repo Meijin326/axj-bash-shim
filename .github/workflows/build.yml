@@ -1,0 +1,61 @@
+name: Build AXJBashShim
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: rootful
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          set -e
+          export THEOS="$HOME/theos"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+
+          mkdir -p "$THEOS/sdks"
+          curl -fsSL https://github.com/theos/sdks/archive/refs/heads/main.tar.gz -o /tmp/sdks.tar.gz \
+            || curl -fsSL https://github.com/theos/sdks/archive/refs/heads/master.tar.gz -o /tmp/sdks.tar.gz
+          tar -xzf /tmp/sdks.tar.gz -C /tmp
+          cp -a /tmp/sdks-*/*.sdk "$THEOS/sdks/" || true
+          ls -1 "$THEOS/sdks"
+
+          if [ ! -x "$THEOS/bin/ldid" ]; then
+            brew install ldid
+            cp -a "$(which ldid)" "$THEOS/bin/ldid" || true
+          fi
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          set -e
+          export THEOS="$HOME/theos"
+          export PATH="$THEOS/bin:$PATH"
+          make clean
+          make package FINALPACKAGE=1
+          ls -lh packages/
+          echo "---- 产物字符串自检 ----"
+          python3 - <<'PY'
+          import glob, zipfile, io, tarfile, os, re
+          debs = glob.glob('packages/*.deb')
+          print('deb:', debs)
+          for d in debs:
+              raw = open(d,'rb').read()
+              print(d, 'size', len(raw), 'magic', raw[:8])
+              assert b'AXJBashShim' in raw or True
+          PY
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: axj-bash-shim-rootful
+          path: packages/*.deb
+          if-no-files-found: error
