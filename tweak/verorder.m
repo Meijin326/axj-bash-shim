@@ -146,7 +146,9 @@ static void vo_maybe_reverse(id vc) {
     int32_t off = vo_groups_offset();
     if (off <= 0) { vo_log("bad ivar offset %d", (int)off); return; }
 
-    id arr = *(id *)((char *)(void *)vc + off);
+    // ARC 下不能直接 cast 成 id*，走 __bridge
+    void *slot = (char *)(void *)vc + off;
+    id arr = (__bridge id)(*(void **)slot);
     if (arr == NULL) { vo_log("_groups is nil (off=%d)", (int)off); return; }
     if (![arr isKindOfClass:[NSMutableArray class]]) {
         vo_log("_groups NOT mutable (%s) -> skip", object_getClassName(arr));
