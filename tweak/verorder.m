@@ -187,9 +187,21 @@ static void vo_maybe_reverse(id vc) {
 
 static void (*vo_orig_viewDidLoad)(id, SEL);
 static NSInteger (*vo_orig_numSections)(id, SEL, id);
+static void (*vo_orig_viewWillAppear)(id, SEL, BOOL);
 
 static void vo_viewDidLoad(id self, SEL _cmd) {
     vo_orig_viewDidLoad(self, _cmd);
+}
+
+// 两个触发点都调 vo_maybe_reverse（内部幂等：只在顺序仍是升序时翻一次）。
+// 无论 _groups 是 viewDidLoad 同步建好、还是异步才填上，都能被覆盖到。
+static void vo_viewWillAppear(id self, SEL _cmd, BOOL animated) {
+    @try {
+        vo_maybe_reverse(self);
+    } @catch (NSException *e) {
+        vo_log("exception(willAppear): %s", [[e description] UTF8String]);
+    }
+    vo_orig_viewWillAppear(self, _cmd, animated);
 }
 
 static NSInteger vo_numSections(id self, SEL _cmd, id tv) {
@@ -218,7 +230,13 @@ __attribute__((constructor)) static void vo_init(void) {
             method_setImplementation(m2, (IMP)vo_numSections);
         }
 
-        vo_log("verorder installed (viewDidLoad=%p numSections=%p)",
-               (void *)m1, (void *)m2);
+        Method m3 = class_getInstanceMethod(c, sel_registerName("viewWillAppear:"));
+        if (m3 != NULL) {
+            vo_orig_viewWillAppear = (void *)method_getImplementation(m3);
+            method_setImplementation(m3, (IMP)vo_viewWillAppear);
+        }
+
+        vo_log("verorder installed (viewDidLoad=%p numSections=%p viewWillAppear=%p)",
+               (void *)m1, (void *)m2, (void *)m3);
     }
 }
