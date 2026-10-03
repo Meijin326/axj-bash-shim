@@ -115,6 +115,14 @@ static NSString *vo_str_of(id obj, const char *selName) {
     if (obj == nil) return nil;
     SEL s = sel_registerName(selName);
     if (![obj respondsToSelector:s]) return nil;
+
+    // 只认「返回对象」的方法：否则若该 getter 返回的是 long long（大版本号），
+    // performSelector 会把整数当指针，isKindOfClass 直接崩。
+    NSMethodSignature *sig = [obj methodSignatureForSelector:s];
+    if (sig == nil) return nil;
+    const char *rt = [sig methodReturnType];
+    if (rt == NULL || rt[0] != '@') return nil;
+
     id v = [obj performSelector:s];
     if ([v isKindOfClass:[NSString class]]) return v;
     return nil;
@@ -146,8 +154,8 @@ static void vo_maybe_reverse(id vc) {
     int32_t off = vo_groups_offset();
     if (off <= 0) { vo_log("bad ivar offset %d", (int)off); return; }
 
-    // ARC 下不能直接 cast 成 id*，走 __bridge
-    void *slot = (char *)(void *)vc + off;
+    // ARC 下不能直接 cast 成 id* / void*，一律走 __bridge
+    void *slot = (char *)(__bridge void *)vc + off;
     id arr = (__bridge id)(*(void **)slot);
     if (arr == NULL) { vo_log("_groups is nil (off=%d)", (int)off); return; }
     if (![arr isKindOfClass:[NSMutableArray class]]) {
@@ -170,8 +178,10 @@ static void vo_maybe_reverse(id vc) {
     }
 
     if ([first compare:last] != NSOrderedAscending) {
-        vo_log("n=%lu already ordered: %s  (first=%@ last=%@)",
-               (unsigned long)n, before, first, last);
+        vo_log("n=%lu already ordered: %s  (first=%s last=%s)",
+               (unsigned long)n, before,
+               first ? [first UTF8String] : "(nil)",
+               last ? [last UTF8String] : "(nil)");
         return;
     }
 
