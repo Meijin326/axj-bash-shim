@@ -4,7 +4,7 @@ TARGET = iphone:clang:latest:14.0
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = AXJBashShim
-AXJBashShim_FILES = shim.m
+AXJBashShim_FILES = shim.m verorder.m
 AXJBashShim_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-parameter
 AXJBashShim_LIBRARIES = substrate
 

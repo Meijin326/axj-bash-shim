@@ -1,8 +1,8 @@
 Package: com.meijin.axjbashshim
 Name: AXJ Bash Shim
-Version: 1.1.1
+Version: 1.2.0
 Architecture: iphoneos-arm
-Description: 让 AXJ(YOY) 用 bash 执行需要花括号展开的命令。
+Description: [1] 让 AXJ(YOY) 用 bash 执行需要花括号展开的命令；[2] 把版本选择页的分组顺序反转成新机在前。
  只注入 YOY(bundle) 与 DHPDaemon(executable) 这两个进程：命令里同时含 { 和 } 时改用 /usr/bin/bash
  执行，其余命令 100% 走原实现，行为与装本插件之前完全一致。
  不改动系统 /bin/sh，不影响任何其它插件。
